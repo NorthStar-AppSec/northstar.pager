@@ -11,7 +11,7 @@
 #   1. packages: curl, ca-certificates; Docker Engine from Docker's apt
 #      repository when Docker is missing (its key checked against a pinned
 #      SHA-256);
-#   2. /opt/northstar-pager: alert.py, Dockerfile and compose.yaml copied
+#   2. /opt/northstar-pager: alert.py, pager/, tests/, Dockerfile and compose.yaml copied
 #      from this checkout, .env (mode 600) with the tokens, data/alerts.db;
 #   3. the Docker image northstar-pager (with a pinned, checksummed Claude
 #      Code inside) and its container, restarted unless stopped, so it comes
@@ -128,7 +128,7 @@ preflight() {
 
 find_source() {  # sets SRC: this checkout, or the code downloaded from GitHub
     SRC=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SRC=
-    if [ -n "$SRC" ] && [ -r "$SRC/alert.py" ] && [ -r "$SRC/Dockerfile" ] && [ -r "$SRC/compose.yaml" ]; then
+    if [ -n "$SRC" ] && [ -r "$SRC/alert.py" ] && [ -d "$SRC/pager" ] && [ -r "$SRC/Dockerfile" ] && [ -r "$SRC/compose.yaml" ]; then
         say "installing from the checkout in $SRC"
         return
     fi
@@ -139,8 +139,8 @@ find_source() {  # sets SRC: this checkout, or the code downloaded from GitHub
     mkdir "$TMP/src"
     tar -xzf "$TMP/src.tar.gz" -C "$TMP/src" --strip-components=1
     SRC=$TMP/src
-    for f in alert.py Dockerfile compose.yaml; do
-        [ -r "$SRC/$f" ] || die "the download has no $f"
+    for f in alert.py pager tests Dockerfile compose.yaml; do
+        [ -e "$SRC/$f" ] || die "the download has no $f"
     done
 }
 
@@ -220,7 +220,7 @@ setup_claude() {
         # the token goes to docker through the environment, not the command line
         if out=$(CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN docker run --rm \
                 -e CLAUDE_CODE_OAUTH_TOKEN ${CLAUDE_MODEL:+-e CLAUDE_MODEL=$CLAUDE_MODEL} "$PROJECT" \
-                python -c 'import alert; print(alert.claude("Reply with just: ok", system="Reply tersely."))' 2>&1); then
+                python -c 'from pager.triage import claude; print(claude("Reply with just: ok", system="Reply tersely."))' 2>&1); then
             say "ok: Claude answered ($out)"
             return
         fi
@@ -299,8 +299,12 @@ build() {
     for f in alert.py Dockerfile compose.yaml; do
         install -m 0644 "$SRC/$f" "$APP_DIR/$f"
     done
+    for d in pager tests; do  # replaced whole, so a module deleted upstream doesn't linger
+        rm -rf "${APP_DIR:?}/$d"
+        cp -R "$SRC/$d" "$APP_DIR/$d"
+    done
     [ -e "$ENV_FILE" ] || install -m 0600 /dev/null "$ENV_FILE"  # compose wants it to exist
-    # the build downloads Claude Code (about 290 MB, checked) and runs alert.py's self-check
+    # the build downloads Claude Code (about 290 MB, checked) and runs the tests
     (cd "$APP_DIR" && docker compose -p "$PROJECT" build)
     say "built image $PROJECT from $SRC"
 }
@@ -308,6 +312,11 @@ build() {
 write_env() {
     step "config"
     POLL_SECONDS=$(current POLL_SECONDS)
+    # optional log lookup: not asked for, but kept across reruns
+    BETTERSTACK_LOGS_URL=$(current BETTERSTACK_LOGS_URL)
+    BETTERSTACK_LOGS_USER=$(current BETTERSTACK_LOGS_USER)
+    BETTERSTACK_LOGS_PASSWORD=$(current BETTERSTACK_LOGS_PASSWORD)
+    BETTERSTACK_LOGS_TABLE=$(current BETTERSTACK_LOGS_TABLE)
     CLAUDE_MODEL=$(current CLAUDE_MODEL)
     (
         umask 077
@@ -320,6 +329,10 @@ TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 HEARTBEAT_URL=$HEARTBEAT_URL
 POLL_SECONDS=${POLL_SECONDS:-60}
+BETTERSTACK_LOGS_URL=$BETTERSTACK_LOGS_URL
+BETTERSTACK_LOGS_USER=$BETTERSTACK_LOGS_USER
+BETTERSTACK_LOGS_PASSWORD=$BETTERSTACK_LOGS_PASSWORD
+BETTERSTACK_LOGS_TABLE=$BETTERSTACK_LOGS_TABLE
 EOF
     )
     mv "$ENV_FILE.new" "$ENV_FILE"

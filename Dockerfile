@@ -17,6 +17,8 @@ RUN set -eu; \
 
 WORKDIR /app
 COPY alert.py .
+COPY pager pager
+COPY tests tests
 ENV ALERT_DB=/data/alerts.db PYTHONUNBUFFERED=1 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-RUN python alert.py --check
+RUN python -m unittest -q
 CMD ["python", "alert.py"]

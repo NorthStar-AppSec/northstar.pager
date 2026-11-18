@@ -7,19 +7,23 @@ When Better Stack opens an incident, northstar.pager has Claude read it and send
 It replaces Better Stack's paid on-call add-on with one small Python file, a Docker container and the Claude subscription you already have.
 
 ```
-🚨 69 scripted requests on the API in an hour
-🕒 Wed 18 Nov 21:09 (12 min ago)
+🚨 Security overview › API 4xx burst from one IP (50+ in 10 min)
+🕒 Wed 18 Nov 21:34 (11 min ago)
 
-P2 · 69 scripted curl/python requests hit /api/ in one hour
-→ Check API logs since 21:09 for source IPs and endpoints hit by curl/python-requests user agents.
+P3 · Scanner hit backoffice login and guessed API paths, finished
+→ Nothing to do now; third scanner this week, add a Bunny rate limit on /api/ and /backoffice/.
 
-Why: Over double the 30/hour threshold from scripting tools, but no sign the API is down.
-Likely cause: A scraper or someone probing the API, or your own script using curl/requests.
+Why: 418 requests, none logged in; the 200s and 302s are the public login page. Stopped at 21:45.
 
-Monitor: More than 30 requests in an hour on /api/ … (Better Stack's own description)
+🔎 Logs for IP 152.32.213.37
+⚪ Stopped · last request 21:45
+418 requests since 21:42 · 0 logged in · 114 public pages, no credential
+Responses: 304× 404; 57× 200; 57× 302
+Most hit: GET /backoffice/login/ (57); GET /backoffice/ (57); GET /api/ (12)
+Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/ (36); …
 ```
 
-The first two lines tell you **what** happened and **when** it started. The next two give Claude's verdict (`P1` down or under attack, `P2` degraded or suspicious, `P3` noise) and the first thing to do. The detail comes after. When the incident closes you get a short follow-up:
+The first two lines tell you **what** happened and **when** it started. The next three give Claude's verdict (`P1` down or got through, `P2` degraded or still active, `P3` noise) and the one thing to do. With log access set up, the 🔎 block shows what the culprit did, looked up just before the alert was sent: whether it is still going, whether anyone logged in (a public login page doesn't count), what it targeted, and the other side of the same requests (which users, IPs, API keys and organizations were involved, and whether a staff override was used). The culprit is whoever the alert names: an IP, a user (`user 1838`), an API key (`los_…`), or an organization, partner or leadbot it was aimed at. A security alert that names nobody, such as "tenant-boundary probing", gets the top two failing actors from the logs. (The 🔎 block is real output from 18 Nov; the verdict above it is illustrative.) When the incident closes you get a short follow-up:
 
 ```
 ✅ Resolved: 69 scripted requests on the API in an hour
@@ -46,7 +50,18 @@ Better Stack ──poll every 60s──▶ alert.py ──new incident──▶ 
 
 Incidents that were already resolved before the pager first saw them are skipped. When Better Stack can't be reached, it waits longer between polls, up to 10 minutes.
 
-Everything is in [`alert.py`](alert.py): Python's standard library plus the `claude` CLI, with no other packages.
+Python's standard library plus the `claude` CLI, with no other packages:
+
+| File | Does |
+|---|---|
+| [`alert.py`](alert.py) | Entry point: checks the env, polls in a loop, heartbeat, back-off |
+| [`pager/poll.py`](pager/poll.py) | One poll: store new incidents, investigate, triage, send what is unsent |
+| [`pager/investigate.py`](pager/investigate.py) | Finds who the alert is about and summarizes their `auth_audit` lines |
+| [`pager/triage.py`](pager/triage.py) | The prompt and the locked-down `claude -p` call |
+| [`pager/messages.py`](pager/messages.py) | The 🚨 and ✅ texts |
+| [`pager/betterstack.py`](pager/betterstack.py), [`telegram.py`](pager/telegram.py), [`net.py`](pager/net.py) | The API clients |
+| [`pager/store.py`](pager/store.py), [`clock.py`](pager/clock.py) | SQLite and time formatting |
+| [`tests/`](tests) | `python3 -m unittest`, offline |
 
 ## What you need
 
@@ -95,7 +110,7 @@ Alerts are stored in `./data/alerts.db`.
 To send a fake alert through Claude and Telegram without waiting for Better Stack:
 
 ```bash
-docker compose run --rm alert python -c "import alert; a={'name':'TEST api.example.com','url':'https://api.example.com/health','cause':'Status 502','started_at':alert.now()}; alert.telegram(alert.fire_message({**a,'triage':alert.triage(a,'')}))"
+docker compose run --rm alert python -c "from pager import clock, messages, telegram, triage; a={'name':'TEST api.example.com','url':'https://api.example.com/health','cause':'Status 502','started_at':clock.now()}; telegram.send(messages.fire_message({**a,'triage':triage.triage(a,'')}))"
 ```
 
 To test the whole chain, create a Better Stack monitor on a URL that can't work, such as `https://pager-test.invalid`. Wait for the 🚨 message, then pause the monitor to get the ✅.
@@ -112,12 +127,12 @@ python3 alert.py
 ## Build and test
 
 ```bash
-python3 alert.py --check            # offline self-check, needs no tokens or network
-docker build -t northstar-pager .   # also runs the self-check; a failing check fails the build
+python3 -m unittest                 # offline tests, need no tokens or network
+docker build -t northstar-pager .   # also runs the tests; a failing test fails the build
 shellcheck install.sh
 ```
 
-The self-check covers storing, de-duplicating, the retry when Telegram is down, resolved messages, alerts that are still sent when triage fails, and the message layout.
+The tests cover storing, de-duplicating, the retry when Telegram is down, resolved messages, alerts that are still sent when triage fails, the log summary, and the message layout.
 
 The [Dockerfile](Dockerfile) downloads Claude Code `2.1.308` and checks it against pinned SHA-256s, the same as the northstar worker. Change `CLAUDE_VERSION` and both checksums together.
 
@@ -135,12 +150,14 @@ All settings are environment variables, in `.env`:
 | `POLL_SECONDS` | no | `60` | How often to check Better Stack |
 | `CLAUDE_MODEL` | no | `claude-opus-5-5` | Model used for triage, at low effort for speed |
 | `ALERT_TZ` | no | `Europe/Amsterdam` | Time zone for times in messages |
+| `BETTERSTACK_LOGS_URL`, `_USER`, `_PASSWORD` | no | | Better Stack → your log source → *Connect remotely*. Enables the 🔎 log lookup |
+| `BETTERSTACK_LOGS_TABLE` | no | | That source's table without suffix, e.g. `t123456_production` |
 | `ALERT_DB` | no | `./alerts.db` (`/data/alerts.db` in Docker) | SQLite file |
 
 ## Limits
 
 - **Only Better Stack Uptime incidents.** Telemetry alerts and other sources aren't read.
-- **The triage only sees what's in the incident.** Claude doesn't look at your logs or metrics. It reasons from the monitor's description and recent history.
+- **The log lookup reads only the `auth_audit` trail** (the LeadBot backend's audit log), from 15 minutes before the incident until now, for at most two subjects. It runs only for security alerts, recognized by keyword in the incident text (auth, denied, privilege, tenant, 4xx…), so a plain outage never triggers it. Subjects are found by pattern in that same text. The lookup stays off until all four `BETTERSTACK_LOGS_*` settings are filled in, and the pager logs a warning at startup when only some are. Claude itself has no tools: it reasons from the incident, recent history and that summary.
 - **One message per incident.** There's no acknowledge button or escalation if you don't respond.
 - **It reads the first 50 incidents of the last two days.** That is plenty unless something is very wrong.
 
