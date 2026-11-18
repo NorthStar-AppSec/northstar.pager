@@ -1,6 +1,7 @@
 services:
   alert:
     build: .
+    image: northstar-pager
     restart: unless-stopped
     env_file: .env
     volumes:

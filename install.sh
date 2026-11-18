@@ -10,11 +10,13 @@
 #      SHA-256);
 #   2. /opt/northstar-pager: alert.py, Dockerfile and compose.yaml copied
 #      from this checkout, .env (mode 600) with the tokens, data/alerts.db;
-#   3. the Docker container northstar-pager, restarted unless stopped, so it
-#      comes back after a reboot.
+#   3. the Docker image northstar-pager (with a pinned, checksummed Claude
+#      Code inside) and its container, restarted unless stopped, so it comes
+#      back after a reboot.
 # On the way it walks you through each token and checks it works: Better
-# Stack, Anthropic (Claude), the Telegram bot (it finds your chat id for
-# you) and an optional heartbeat, then sends a test message.
+# Stack, Claude (a `claude setup-token` token, so triage runs on your Claude
+# subscription as the northstar worker does), the Telegram bot (it finds
+# your chat id for you) and an optional heartbeat, then sends a test message.
 # Rerun it to upgrade (after `git pull`) or to change answers; the current
 # ones are the defaults. --uninstall removes 2 and 3.
 
@@ -178,25 +180,33 @@ setup_betterstack() {
     done
 }
 
-setup_anthropic() {
+setup_claude() {
     step "Claude"
-    tty "Claude triages each alert. It needs an Anthropic API key (pay per use;"
-    tty "a triage costs well under a cent). A Claude.ai subscription token does not work here."
-    tty "  1. Open https://console.anthropic.com/settings/keys"
-    tty "  2. Create Key, name it e.g. 'northstar-pager', copy it (starts with sk-ant-)"
-    tty "  3. Make sure the organization has credits under Billing"
+    tty "Claude triages each alert through Claude Code on your Claude subscription"
+    tty "(Pro or Max), like the northstar worker. It needs a long-lived token:"
+    tty "  1. On a machine where Claude Code is installed (your laptop is fine), run:"
+    tty "       claude setup-token"
+    tty "  2. Log in in the browser it opens; it prints a token starting with sk-ant-oat"
+    tty "     (valid for a year; rerun this script with a new one when it expires)"
     while :; do
-        ask_secret "Anthropic API key" "$(current ANTHROPIC_API_KEY)"
-        ANTHROPIC_API_KEY=$ANSWER
-        [ -n "$ANTHROPIC_API_KEY" ] || { tty "  a key is required"; continue; }
-        code=$(http "$TMP/an.json" https://api.anthropic.com/v1/models \
-            -H "@$(header_file "x-api-key: $ANTHROPIC_API_KEY")" -H "anthropic-version: 2023-06-01")
-        case $code in
-            200) say "ok: Anthropic accepts the key"; return ;;
-            401 | 403) tty "  Anthropic refused that key ($code)" ;;
-            *) tty "  could not check it (HTTP $code)" ;
-               ask_yes "  keep it anyway?" n && return ;;
+        ask_secret "Claude Code token" "$(current CLAUDE_CODE_OAUTH_TOKEN)"
+        CLAUDE_CODE_OAUTH_TOKEN=$ANSWER
+        case $CLAUDE_CODE_OAUTH_TOKEN in
+            "") tty "  a token is required"; continue ;;
+            sk-ant-oat*) ;;
+            sk-ant-api*) tty "  that is an API key, not a \`claude setup-token\` token"; continue ;;
+            *) warn "that does not look like a \`claude setup-token\` token (sk-ant-oat…)" ;;
         esac
+        say "checking it with one short Claude call (a few seconds)…"
+        # the token goes to docker through the environment, not the command line
+        if out=$(CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN docker run --rm \
+                -e CLAUDE_CODE_OAUTH_TOKEN ${CLAUDE_MODEL:+-e CLAUDE_MODEL=$CLAUDE_MODEL} "$PROJECT" \
+                python -c 'import alert; print(alert.claude("Reply with just: ok", system="Reply tersely."))' 2>&1); then
+            say "ok: Claude answered ($out)"
+            return
+        fi
+        tty "  Claude did not answer: $(printf '%s' "$out" | tail -n 1)"
+        ask_yes "  keep the token anyway?" n && return
     done
 }
 
@@ -264,19 +274,29 @@ setup_heartbeat() {
 
 # --- install, start, report ---------------------------------------------------
 
-write_files() {
-    step "install"
+build() {
+    step "build"
     install -d -m 0755 "$APP_DIR" "$APP_DIR/data"
     for f in alert.py Dockerfile compose.yaml; do
         install -m 0644 "$SRC/$f" "$APP_DIR/$f"
     done
+    [ -e "$ENV_FILE" ] || install -m 0600 /dev/null "$ENV_FILE"  # compose wants it to exist
+    # the build downloads Claude Code (about 290 MB, checked) and runs alert.py's self-check
+    (cd "$APP_DIR" && docker compose -p "$PROJECT" build)
+    say "built image $PROJECT from $SRC"
+}
+
+write_env() {
+    step "config"
     POLL_SECONDS=$(current POLL_SECONDS)
+    CLAUDE_MODEL=$(current CLAUDE_MODEL)
     (
         umask 077
         cat >"$ENV_FILE.new" <<EOF
 # written by install.sh; rerun it to change these
 BETTERSTACK_TOKEN=$BETTERSTACK_TOKEN
-ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN
+CLAUDE_MODEL=$CLAUDE_MODEL
 TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 HEARTBEAT_URL=$HEARTBEAT_URL
@@ -284,13 +304,12 @@ POLL_SECONDS=${POLL_SECONDS:-60}
 EOF
     )
     mv "$ENV_FILE.new" "$ENV_FILE"
-    say "files in $APP_DIR, tokens in $ENV_FILE (root only)"
+    say "tokens in $ENV_FILE (root only)"
 }
 
 start() {
     step "start"
-    # the build runs alert.py's self-check, so a broken copy never starts
-    (cd "$APP_DIR" && docker compose -p "$PROJECT" up -d --build --remove-orphans)
+    (cd "$APP_DIR" && docker compose -p "$PROJECT" up -d --remove-orphans)
     sleep 5
     state=$(docker inspect -f '{{.State.Status}}' "$(cd "$APP_DIR" && docker compose -p "$PROJECT" ps -q alert)" 2>/dev/null || echo missing)
     [ "$state" = running ] || die "the container is $state; see: cd $APP_DIR && docker compose -p $PROJECT logs"
@@ -322,7 +341,7 @@ uninstall() {
     [ -d "$APP_DIR" ] || { say "nothing installed in $APP_DIR"; return; }
     ask_yes "Stop and remove northstar.pager?" n || return 0
     if has docker && [ -r "$APP_DIR/compose.yaml" ]; then
-        (cd "$APP_DIR" && docker compose -p "$PROJECT" down --rmi local) || warn "docker compose down failed"
+        (cd "$APP_DIR" && docker compose -p "$PROJECT" down --rmi all) || warn "docker compose down failed"
     fi
     if ask_yes "Also delete the alert history ($APP_DIR/data)?" n; then
         rm -rf "$APP_DIR"
@@ -357,11 +376,13 @@ main() {
     step "packages"
     install_packages
     install_docker
+    build
+    CLAUDE_MODEL=$(current CLAUDE_MODEL)
     setup_betterstack
-    setup_anthropic
+    setup_claude
     setup_telegram
     setup_heartbeat
-    write_files
+    write_env
     start
     test_message
     report
