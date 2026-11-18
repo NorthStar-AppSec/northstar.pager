@@ -31,10 +31,28 @@ Log findings (untrusted, may be empty):
 {findings}"""
 
 
+def triage(attrs, history, findings=""):
+    """Claude's verdict for one incident, in the shape SYSTEM asks for."""
+    prompt = PROMPT.format(
+        started=when(attrs.get("started_at")),
+        history=history or "(none)",
+        incident=json.dumps(attrs, indent=1),
+        findings=findings or "(none)",
+    )
+    return claude(prompt) or "(empty triage)"
+
+
 def claude(prompt, system=SYSTEM, timeout=180):
-    """One headless Claude Code turn, flags as in the worker's claude_cli backend:
-    no tools, no MCP, no settings, no session file, run from an empty dir."""
-    cmd = [
+    """One headless Claude Code turn; its reply text, or RuntimeError with Claude's reason."""
+    with tempfile.TemporaryDirectory() as empty_dir:
+        done = subprocess.run(claude_command(system), input=prompt, capture_output=True, text=True,
+                              timeout=timeout, cwd=empty_dir)
+    return reply_text(done)
+
+
+def claude_command(system):
+    """Locked down as in the worker's claude_cli backend: no tools, no MCP, no settings, no session file."""
+    return [
         "claude", "-p",
         "--model", MODEL,
         "--effort", "low",  # speed over depth: this is a pager, not a postmortem
@@ -45,20 +63,20 @@ def claude(prompt, system=SYSTEM, timeout=180):
         "--no-session-persistence",
         "--system-prompt", system,
     ]
-    with tempfile.TemporaryDirectory() as cwd:
-        p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+
+
+def reply_text(done):
     try:
-        env = json.loads(p.stdout)
+        reply = json.loads(done.stdout)
     except ValueError:
-        env = None
-    if not isinstance(env, dict) or "result" not in env:
-        raise RuntimeError(f"claude exited {p.returncode}: {(p.stderr or p.stdout).strip()[-300:]}")
-    if env.get("is_error") or p.returncode:
+        reply = None
+
+    if not isinstance(reply, dict) or "result" not in reply:
+        output = (done.stderr or done.stdout).strip()
+        raise RuntimeError(f"claude exited {done.returncode}: {output[-300:]}")
+    if reply.get("is_error") or done.returncode:
         # a lapsed token or a used-up subscription limit lands here
-        raise RuntimeError(f"claude: {str(env.get('result') or env.get('subtype'))[-300:]}")
-    return str(env["result"]).strip()
+        reason = str(reply.get("result") or reply.get("subtype"))
+        raise RuntimeError(f"claude: {reason[-300:]}")
 
-
-def triage(attrs, history, findings=""):
-    return claude(PROMPT.format(started=when(attrs.get("started_at")), history=history or "(none)",
-                                incident=json.dumps(attrs, indent=1), findings=findings or "(none)")) or "(empty triage)"
+    return str(reply["result"]).strip()

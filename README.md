@@ -55,12 +55,15 @@ Python's standard library plus the `claude` CLI, with no other packages:
 | File | Does |
 |---|---|
 | [`alert.py`](alert.py) | Entry point: checks the env, polls in a loop, heartbeat, back-off |
-| [`pager/poll.py`](pager/poll.py) | One poll: store new incidents, investigate, triage, send what is unsent |
-| [`pager/investigate.py`](pager/investigate.py) | Finds who the alert is about and summarizes their `auth_audit` lines |
+| [`pager/poll.py`](pager/poll.py) | One poll: record new incidents with their page text, send what is unsent |
+| [`pager/store.py`](pager/store.py) | SQLite: the incidents, and the outbox of unsent messages |
+| [`pager/investigate.py`](pager/investigate.py) | Decides whether and who to look up in the logs |
+| [`pager/audit.py`](pager/audit.py) | Reads `auth_audit` lines: who made a request, did it get through |
+| [`pager/summary.py`](pager/summary.py) | Writes the 🔎 block from those lines |
 | [`pager/triage.py`](pager/triage.py) | The prompt and the locked-down `claude -p` call |
 | [`pager/messages.py`](pager/messages.py) | The 🚨 and ✅ texts |
 | [`pager/betterstack.py`](pager/betterstack.py), [`telegram.py`](pager/telegram.py), [`net.py`](pager/net.py) | The API clients |
-| [`pager/store.py`](pager/store.py), [`clock.py`](pager/clock.py) | SQLite and time formatting |
+| [`pager/clock.py`](pager/clock.py) | Local time, "12 min ago" |
 | [`tests/`](tests) | `python3 -m unittest`, offline |
 
 ## What you need

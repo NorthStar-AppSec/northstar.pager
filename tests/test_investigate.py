@@ -3,7 +3,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from pager.investigate import investigate, named_subjects, summarize
+from pager.investigate import investigate, named_subjects
+from pager.summary import summarize
 from pager.betterstack import LOGS_ENV
 from tests.helpers import audit
 
