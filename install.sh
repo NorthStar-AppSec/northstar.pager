@@ -1,8 +1,11 @@
 #!/bin/sh
 # Set up northstar.pager on a Debian or Ubuntu machine, as root.
 #
-#   git clone git@github.com:NorthStar-AppSec/northstar.pager.git
-#   cd northstar.pager && sudo ./install.sh
+#   curl -fsSL https://raw.githubusercontent.com/NorthStar-AppSec/northstar.pager/main/install.sh | sudo sh
+#   # or, from a checkout:  sudo ./install.sh
+#
+# Piped, it downloads the code it installs from GitHub (PAGER_REF, default
+# main: a branch or tag); from a checkout it installs that checkout.
 #
 # What it changes on this machine, and nothing else:
 #   1. packages: curl, ca-certificates; Docker Engine from Docker's apt
@@ -17,13 +20,14 @@
 # Stack, Claude (a `claude setup-token` token, so triage runs on your Claude
 # subscription as the northstar worker does), the Telegram bot (it finds
 # your chat id for you) and an optional heartbeat, then sends a test message.
-# Rerun it to upgrade (after `git pull`) or to change answers; the current
-# ones are the defaults. --uninstall removes 2 and 3.
+# Rerun it to upgrade or to change answers; the current ones are the
+# defaults. --uninstall removes 2 and 3.
 
 set -eu
 
 # https://download.docker.com/linux/{debian,ubuntu}/gpg (the same file)
 DOCKER_KEY_SHA256=1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
+REPO=NorthStar-AppSec/northstar.pager
 APP_DIR=/opt/northstar-pager
 ENV_FILE=$APP_DIR/.env
 PROJECT=northstar-pager
@@ -37,7 +41,8 @@ tty() { printf '%s\n' "$*" >/dev/tty; }
 
 usage() {
     cat <<EOF
-usage: sudo ./install.sh [--uninstall]
+usage: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sudo sh [-s -- --uninstall]
+       sudo ./install.sh [--uninstall]   (from a checkout)
 
   --uninstall   stop and remove the pager, its image and $APP_DIR (asks
                 before deleting the alert history)
@@ -62,7 +67,7 @@ ask_yes() {  # question default(y|n): true for yes
 
 ask() {  # prompt current: sets ANSWER, Enter keeps current
     printf '%s%s: ' "$1" "${2:+ [$2]}" >/dev/tty
-    read -r ANSWER </dev/tty || ANSWER=
+    read -r ANSWER </dev/tty || die "no answer (end of input)"
     ANSWER=${ANSWER:-$2}
 }
 
@@ -73,7 +78,7 @@ ask_secret() {  # prompt current: sets ANSWER, not echoed, Enter keeps current
         printf '%s: ' "$1" >/dev/tty
     fi
     stty -echo </dev/tty
-    read -r ANSWER </dev/tty || ANSWER=
+    read -r ANSWER </dev/tty || { stty echo </dev/tty; die "no answer (end of input)"; }
     stty echo </dev/tty
     printf '\n' >/dev/tty
     ANSWER=${ANSWER:-$2}
@@ -119,9 +124,23 @@ preflight() {
     esac
     ARCH=$(dpkg --print-architecture)
     (: </dev/tty) 2>/dev/null || die "no terminal to ask on: run it from an interactive shell"
-    SRC=$(cd "$(dirname "$0")" && pwd)
+}
+
+find_source() {  # sets SRC: this checkout, or the code downloaded from GitHub
+    SRC=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SRC=
+    if [ -n "$SRC" ] && [ -r "$SRC/alert.py" ] && [ -r "$SRC/Dockerfile" ] && [ -r "$SRC/compose.yaml" ]; then
+        say "installing from the checkout in $SRC"
+        return
+    fi
+    ref=${PAGER_REF:-main}
+    say "downloading $REPO ($ref)"
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$TMP/src.tar.gz" \
+        "https://codeload.github.com/$REPO/tar.gz/$ref" || die "could not download $REPO at $ref"
+    mkdir "$TMP/src"
+    tar -xzf "$TMP/src.tar.gz" -C "$TMP/src" --strip-components=1
+    SRC=$TMP/src
     for f in alert.py Dockerfile compose.yaml; do
-        [ -r "$SRC/$f" ] || die "run it from a checkout of northstar.pager: $SRC/$f is missing"
+        [ -r "$SRC/$f" ] || die "the download has no $f"
     done
 }
 
@@ -333,8 +352,9 @@ report() {
     say "Done. northstar.pager checks Better Stack every ${POLL_SECONDS:-60}s."
     say "  logs:     cd $APP_DIR && docker compose -p $PROJECT logs -f"
     say "  history:  sqlite3 $APP_DIR/data/alerts.db 'SELECT started_at, name, triage FROM alerts ORDER BY started_at DESC LIMIT 10'"
-    say "  upgrade:  git pull && sudo ./install.sh   (Enter through the questions)"
-    say "  remove:   sudo ./install.sh --uninstall"
+    say "  upgrade:  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sudo sh"
+    say "            (Enter through the questions to keep the current answers)"
+    say "  remove:   curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sudo sh -s -- --uninstall"
 }
 
 uninstall() {
@@ -375,6 +395,7 @@ main() {
 
     step "packages"
     install_packages
+    find_source
     install_docker
     build
     CLAUDE_MODEL=$(current CLAUDE_MODEL)
@@ -388,4 +409,5 @@ main() {
     report
 }
 
+# Everything runs from here, so a download cut short by `| sh` runs nothing.
 main "$@"

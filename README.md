@@ -5,14 +5,15 @@ Polls Better Stack for incidents, has Claude triage each new one (through Claude
 ## Install (Debian / Ubuntu)
 
 ```bash
-git clone git@github.com:NorthStar-AppSec/northstar.pager.git
-cd northstar.pager && sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/NorthStar-AppSec/northstar.pager/main/install.sh | sudo sh
 ```
+
+(From a checkout: `sudo ./install.sh`. `PAGER_REF=<tag or branch>` installs another version.)
 
 The script installs Docker if needed, walks you through each token (Better Stack, a `claude setup-token` token for your Claude subscription, your Telegram bot, an optional heartbeat), checks each one works, finds your Telegram chat id, starts the container and sends a test message. Everything lands in `/opt/northstar-pager`.
 
-- Upgrade: `git pull && sudo ./install.sh` (Enter keeps the current answers)
-- Remove: `sudo ./install.sh --uninstall`
+- Upgrade: run the same command again (Enter keeps the current answers)
+- Remove: `curl -fsSL https://raw.githubusercontent.com/NorthStar-AppSec/northstar.pager/main/install.sh | sudo sh -s -- --uninstall`
 - Logs: `cd /opt/northstar-pager && docker compose -p northstar-pager logs -f`
 
 ## Elsewhere
